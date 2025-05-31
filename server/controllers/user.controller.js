@@ -6,7 +6,7 @@ import generateAccessToken from "../utils/generateAccessToken.js";
 import generateRefreshToken from "../utils/generateRefreshToken.js";
 import { request, response } from "express";
 import uploadImageCloudinary from "../utils/uploadImageCloudinary.js";
-
+import JsonWebToken from "jsonwebtoken";
 //register user controller
 
 export async function registerUserController(request,response){
@@ -281,7 +281,36 @@ export async function updateUserDetailsController(request,response){
 
 export async function forgotPasswordController(request,response){
     try{
-        const { email }
+        const { email } = request.body
+        //check if user exists
+        const user = await UserModel.findOne({ email })
+        if (!user) {
+            return response.status(400).json({
+                message: "User not registered",
+                error: true,
+                success: false
+            });
+        }
+        //generate otp
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        //update user with otp
+        const updateUser = await UserModel.updateOne(
+            { _id: user._id },
+            {forget_password_otp: otp, forget_password_expiry: Date.now() + 15 * 60 * 1000 } // OTP valid for 15 minutes
+        );
+        
+        //send email with otp
+        const sendOtpEmail = await sendEmail({
+            sendTo: email,
+            subject: "Reset Password OTP",
+            html: `<p>Your OTP for resetting password is <strong>${otp}</strong>. It is valid for 15 minutes.</p>`
+        });
+        return response.json({
+            message: "OTP sent to your email",
+            error: false,
+            success: true
+        });
+
     }
     catch(error){
         return response.status(500).json({
@@ -289,5 +318,146 @@ export async function forgotPasswordController(request,response){
             error : true, 
             success: false
         })
+    }
+}
+
+//verify forget passwword controller
+export async function verifyForgotPasswordOtpController(request, response) {
+    try {
+        const { email, otp } = request.body;
+
+        // Check if user exists
+        const user = await UserModel.findOne({ email });
+        if (!user) {
+            return response.status(400).json({
+                message: "User not registered",
+                error: true,
+                success: false
+            });
+        }
+
+        // Check if OTP is valid and not expired
+        if (user.forget_password_otp !== otp || Date.now() > user.forget_password_expiry) {
+            return response.status(400).json({
+                message: "Invalid or expired OTP",
+                error: true,
+                success: false
+            });
+        }
+
+        return response.json({
+            message: "otp verified successfully",
+            error: false,
+            success: true
+        });
+
+    } catch (error) {
+        return response.status(500).json({
+            message: error.message || error,
+            error: true,
+            success: false
+        });
+    }
+}
+
+//reset password controller
+export async function resetPasswordController(request, response) {
+    try {
+        const { email, newPassword, confirmPassword} = request.body;
+
+        // Check if user exists
+        const user = await UserModel.findOne({ email });
+        if (!user) {
+            return response.status(400).json({
+                message: "User not registered",
+                error: true,
+                success: false
+            });
+        }
+
+        // Hash the new password
+        const salt = await bcrypt.genSalt(10);
+        const hashPassword = await bcrypt.hash(newPassword, salt);
+        const confirmHashPassword = await bcrypt.hash(confirmPassword, salt);
+        // Check if new password and confirm password match
+        if (newPassword !== confirmPassword) {
+            return response.status(400).json({
+                message: "New password and confirm password do not match",
+                error: true,
+                success: false
+            });
+        }
+        // Update user's password and clear OTP fields
+        const updateUser = await UserModel.updateOne(
+            { _id: user._id },
+            { password: hashPassword, forget_password_otp: "", forget_password_expiry: null }
+        );
+
+        return response.json({
+            message: "Password reset successfully",
+            error: false,
+            success: true
+        });
+
+    } catch (error) {
+        return response.status(500).json({
+            message: error.message || error,
+            error: true,
+            success: false
+        });
+    }
+}
+
+//refresh token controller
+export async function refreshTokenController(request, response) {
+    try {
+        const { refreshToken } = request.cookies.refresh_token || request?.header?.authization?.split(" ")[1];//for mobile app
+
+        if (!refreshToken) {
+            return response.status(401).json({
+                message: "Refresh token not provided",
+                error: true,
+                success: false
+            });
+        }
+        const verifyToken = await JsonWebToken.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+        if (!verifyToken) {
+            return response.status(403).json({
+                message: "Invalid refresh token",
+                error: true,
+                success: false
+            });
+        }
+        const userId = verifyToken._id;
+        if (!userId) {
+            return response.status(403).json({
+                message: "Invalid refresh token",
+                error: true,
+                success: false
+            });
+        }
+
+        // Generate new access token
+        const newAccessToken = await generateAccessToken(userId);
+
+        const cookiesOption = {
+            httpOnly: true,
+            secure: true,
+            sameSite: "None"
+        };
+        response.cookie('accessToken', newAccessToken, cookiesOption);
+        return response.json({
+            message: "New access token generated",
+            error: false,
+            success: true,
+            data: { accessToken }
+        });
+
+    } catch (error) {
+        return response.status(500).json({
+            message: error.message || error,
+            error: true,
+            success: false
+        });
     }
 }
